@@ -6,7 +6,6 @@ A Python command-line tool that analyzes historical stock market data and evalua
 
 The tool fetches stock data using yfinance, calculates several financial metrics using pandas, and scores a selected strategy based on predefined rules.
 
-⸻
 
 Features
 	•	Fetches historical stock data using yfinance
@@ -19,7 +18,7 @@ Features
 	•	Allows custom time frame analysis
 	•	Provides strategy score and latest metrics
 
-⸻
+
 
 Available Strategies
 
@@ -32,7 +31,6 @@ Rules:
 	•	20-day moving average > 50-day moving average
 	•	Positive daily return
 
-⸻
 
 Low Volatility
 
@@ -43,7 +41,7 @@ Rules:
 	•	Daily return within ±2%
 	•	Stable trend (MA20 ≥ MA50)
 
-⸻
+
 
 Value
 
@@ -54,7 +52,7 @@ Rules:
 	•	Volatility < 35%
 	•	Momentum not strongly negative
 
-⸻
+
 
 Balanced
 
@@ -65,15 +63,13 @@ Rules:
 	•	Volatility < 35%
 	•	MA20 > MA50
 
-⸻
+
 
 Technologies Used
 	•	Python
 	•	pandas – data analysis
 	•	yfinance – financial market data
 	•	datetime – time handling
-
-⸻
 
 Installation
 
@@ -89,8 +85,6 @@ Install dependencies:
 
 pip install pandas yfinance
 
-
-⸻
 
 Usage
 
@@ -138,8 +132,6 @@ MA20	20-day moving average
 MA50	50-day moving average
 
 
-⸻
-
 Possible Improvements
 
 Future enhancements could include:
@@ -149,7 +141,7 @@ Future enhancements could include:
 	•	Backtesting strategies
 	•	Web dashboard interface
 
-⸻
+
 
 License
 
