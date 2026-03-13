@@ -10,7 +10,7 @@ Strategies available:
 - Value
 - Balanced
 
-Author: Your Name
+
 """
 
 import yfinance as yf
