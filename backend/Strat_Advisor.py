@@ -1,351 +1,485 @@
-"""
-Stock Strategy Evaluator
+\"""Stock Advisor Application - Multi-Strategy Stock Analysis & Backtesting Tool
 
-This script fetches historical stock data using yfinance and evaluates
-a selected investment strategy based on calculated financial metrics.
-
-Strategies available:
-- Momentum
-- Low Volatility
-- Value
-- Balanced
-
-
+This application provides:
+- Technical analysis metrics (volatility, momentum, moving averages)
+- 5 different investment strategies (momentum, low_volatility, growth, value, balanced)
+- Single stock backtest vs Buy-and-Hold comparison
+- Portfolio backtesting across multiple strategies
 """
 
+from matplotlib.pyplot import hist
 import yfinance as yf
 import pandas as pd
 from datetime import date
+import numpy as np
 
-
-# ---------------------------------------------------------
-# CONSTANTS
-# ---------------------------------------------------------
-
-# Each strategy contains 3 rules
 TOTAL_RULES_PER_STRATEGY = 3
 
+# ===== DATA INITIALIZATION =====
+# Load stock master data and normalize column names
+st = pd.read_csv("stocks_master.csv")
+st.columns = st.columns.str.strip().str.lower()
 
-# ---------------------------------------------------------
-# METRIC CALCULATION
-# ---------------------------------------------------------
-
+# ===== TECHNICAL METRICS CALCULATION =====
 def calculate_metrics(hist: pd.DataFrame) -> pd.DataFrame:
+    """Calculate key technical indicators for stock analysis.
+    
+    Metrics computed:
+    - Returns: Daily percentage price change
+    - Volatility: Annualized 20-day rolling standard deviation
+    - Momentum: 60-day price momentum (60-day return %)
+    - MA20: 20-day simple moving average
+    - MA50: 50-day simple moving average
+    - AvgPrice: Mean price over entire period
     """
-    Calculate financial indicators required for strategy evaluation.
-
-    Parameters
-    ----------
-    hist : pandas DataFrame
-        Historical stock price data returned by yfinance.
-
-    Returns
-    -------
-    pandas DataFrame
-        DataFrame with additional calculated columns.
-    """
-
-    # Create a copy so we don't modify original data
     hist = hist.copy()
-
-    # -----------------------------------------------------
-    # Daily Returns
-    # -----------------------------------------------------
-    # pct_change() calculates percentage change between rows
-    # Example: (today_close - yesterday_close) / yesterday_close
+    
+    # Calculate daily returns
     hist["Returns"] = hist["Close"].pct_change()
-
-    # -----------------------------------------------------
-    # Volatility
-    # -----------------------------------------------------
-    # rolling(20) calculates statistics over last 20 days
-    # std() calculates standard deviation
-    # multiplied by sqrt(252) to annualize volatility
+    print("Daily Returns (first 5 days):")
+    print(hist["Returns"].head())
+    
+    # Annualized volatility: roll 20-day std * sqrt(252 trading days)
     hist["Volatility"] = hist["Returns"].rolling(20).std() * (252 ** 0.5)
-
-    # -----------------------------------------------------
-    # Momentum
-    # -----------------------------------------------------
-    # 60 day percentage return
-    # measures medium-term trend strength
+    print("\nAnnualized Volatility (first 5 days):")
+    print(hist["Volatility"].head())
+    
+    # 60-day momentum captures medium-term trend
     hist["Momentum"] = hist["Close"].pct_change(60)
-
-    # -----------------------------------------------------
-    # Moving Averages
-    # -----------------------------------------------------
-    # Short-term trend
+    
+    # Moving averages for trend detection
     hist["MA20"] = hist["Close"].rolling(20).mean()
-
-    # Medium-term trend
     hist["MA50"] = hist["Close"].rolling(50).mean()
-
-    # -----------------------------------------------------
-    # Average Price (entire dataset)
-    # -----------------------------------------------------
+    
+    # Reference price for value strategy
     hist["AvgPrice"] = hist["Close"].mean()
+    
+    return hist
+
+
+# ===== STRATEGY SCORING ENGINE =====
+def score_strategies(hist: pd.DataFrame, strategy: str) -> float:
+    """Score a stock based on selected strategy using weighted indicators.
+    
+    Scoring approach: Instead of binary (1/0) per rule, uses magnitude-based
+    scoring to reflect signal strength. Score ranges from 0-3 (normalized).
+    
+    Strategies:
+    - momentum: Captures strong uptrends with recent positive momentum
+    - low_volatility: Favors stable stocks with predictable performance
+    - growth: Identifies high-growth stocks outperforming their averages
+    - value: Seeks undervalued stocks trading below historical average
+    - balanced: Mix of moderate growth and stability criteria
+    """
+    if hist.empty:
+        return 0.0
+
+    latest = hist.iloc[-1]
+    score = 0.0
+    max_score = 3.0
+
+    if strategy == "momentum":
+        # Strong positive momentum (>5% 60-day return)
+        momentum_factor = max(0, min(latest["Momentum"] / 0.15, 1))  # Normalized to 0-1
+        score += momentum_factor
+        
+        # MA crossover: positive trend confirmation
+        if latest["MA20"] > latest["MA50"]:
+            ma_diff_pct = ((latest["MA20"] - latest["MA50"]) / latest["MA50"]) * 100
+            ma_strength = min(ma_diff_pct / 2.0, 1)  # Normalized, max at 2% difference
+            score += ma_strength
+        
+        # Recent positive returns (last day)
+        if latest["Returns"] > 0:
+            return_factor = min(latest["Returns"] / 0.05, 1)  # Normalized to 0-1
+            score += return_factor
+
+    elif strategy == "low_volatility":
+        # Prefer lower volatility (stable, predictable returns)
+        volatility_score = max(0, (0.35 - latest["Volatility"]) / 0.35)  # Inverted: lower is better
+        score += volatility_score
+        
+        # Stable recent returns (small daily swings indicate stability)
+        return_stability = max(0, (0.05 - abs(latest["Returns"])) / 0.05)
+        score += return_stability
+        
+        # Uptrend or stability (MA20 >= MA50)
+        if latest["MA20"] >= latest["MA50"]:
+            score += 1.0
+        else:
+            score += 0.3  # Partial credit for downtrend
+
+    elif strategy == "growth":
+        # Strong momentum for growth (>10% 60-day return)
+        growth_momentum = max(0, min(latest["Momentum"] / 0.20, 1))
+        score += growth_momentum
+        
+        # Price above 50-day MA indicates uptrend strength
+        if latest["Close"] > latest["MA50"]:
+            price_strength = min((latest["Close"] - latest["MA50"]) / latest["MA50"], 1)
+            score += price_strength
+        
+        # Price above historical average (trading above norm)
+        avg_price = hist["Close"].mean()
+        if latest["Close"] > avg_price:
+            growth_factor = min((latest["Close"] - avg_price) / avg_price, 1)
+            score += growth_factor
+
+    elif strategy == "value":
+        # Valuation: discount to historical average
+        avg_price = hist["Close"].mean()
+        if latest["Close"] < avg_price:
+            discount = (avg_price - latest["Close"]) / avg_price
+            score += min(discount / 0.15, 1)  # Max score at 15% discount
+        
+        # Stable volatility (< 35% annualized)
+        vol_score = max(0, (0.35 - latest["Volatility"]) / 0.35)
+        score += vol_score
+        
+        # Recovering/non-declining momentum (> -5%)
+        if latest["Momentum"] > -0.05:
+            recovery = (latest["Momentum"] + 0.05) / 0.10  # Normalized range
+            score += min(recovery, 1)
+
+    elif strategy == "balanced":
+        # Moderate positive momentum
+        balanced_momentum = max(0, min(latest["Momentum"] / 0.10, 1))
+        score += balanced_momentum
+        
+        # Moderate volatility (< 35% acceptable)
+        vol_balance = max(0, (0.40 - latest["Volatility"]) / 0.40)
+        score += vol_balance
+        
+        # Positive trend signal
+        if latest["MA20"] > latest["MA50"]:
+            score += 1.0
+        else:
+            score += 0.2  # Small penalty for downtrend
+
+    # Normalize score to 0-3 range
+    return min(score, max_score)
+
+
+def evaluate_stock(row: pd.Series, strategy: str):
+    """Evaluate a single stock against the selected strategy.
+    
+    Returns: Dictionary with ticker, company name, strategy score, and key metrics.
+    Returns None if data is unavailable or insufficient.
+    """
+    ticker_symbol = row["ticker"]
+
+    try:
+        # Fetch 1-year historical data
+        hist = yf.Ticker(ticker_symbol).history(period="1y")
+    except Exception as e:
+        print(f"  Error fetching {ticker_symbol}: {e}")
+        return None
+
+    # Validate data availability
+    if hist.empty:
+        print(f"  {ticker_symbol}: No data available")
+        return None
+
+    # Calculate technical metrics and remove NaN values (from rolling calculations)
+    metrics = calculate_metrics(hist).dropna()
+    if metrics.empty:
+        return None
+
+    # Get most recent day's metrics
+    latest = metrics.iloc[-1]
+
+    return {
+        "ticker": ticker_symbol,
+        "company": row.get("company", row.get("name", "N/A")),
+        "Score": score_strategies(metrics, strategy),
+        "Close": round(latest["Close"], 2),
+        "Returns": round(latest["Returns"] * 100, 2),
+        "Momentum": round(latest["Momentum"] * 100, 2),
+        "Volatility": round(latest["Volatility"] * 100, 2),
+    }
+
+
+# ===== TRADING SIGNAL GENERATION =====
+def generate_signal(hist: pd.DataFrame, strategy: str) -> pd.Series:
+    """Generate buy/hold signals based on strategy scores over time.
+    
+    Signal logic:
+    - 0-60 days: No signal (insufficient data for 60-day momentum)
+    - After day 60: BUY signal (1) if score >= 2.0, HOLD (0) otherwise
+    
+    Returns: Series of binary signals (0/1) aligned with price history.
+    """
+    signals = []
+
+    for i in range(len(hist)):
+        # Warm-up period: need 60 days for momentum calculation
+        if i < 60:
+            signals.append(0)
+            continue
+
+        # Score based on data up to current day
+        window = hist.iloc[:i+1]
+        score = score_strategies(window, strategy)
+        
+        # Buy signal if score exceeds threshold (2.0 out of 3.0 max)
+        signals.append(1 if score >= 2.0 else 0)
+
+    return pd.Series(signals, index=hist.index)
+
+
+# ===== SINGLE STOCK BACKTEST =====
+def backtest_single(hist: pd.DataFrame, strategy: str):
+    """Backtest strategy on single stock vs buy-and-hold approach.
+    
+    Compares:
+    - Market Return: Buy and hold entire period
+    - Strategy Return: Trade based on generated signals
+    
+    Returns: DataFrame with cumulative returns for comparison.
+    """
+    # Calculate all technical metrics
+    hist = calculate_metrics(hist).dropna()
+
+    # Generate trading signals based on strategy
+    hist["Signal"] = generate_signal(hist, strategy)
+    
+    # Calculate daily returns (what market delivered)
+    hist["Market_Return"] = hist["Close"].pct_change()
+    
+    # Strategy return: only earn returns on days signal=1, lagged by 1 day
+    # (realistically, trade executes next day after signal)
+    hist["Strategy_Return"] = hist["Signal"].shift(1) * hist["Market_Return"]
+
+    # Cumulative returns: show how $1 would grow over time
+    hist["Cumulative_Market"] = (1 + hist["Market_Return"]).cumprod()
+    hist["Cumulative_Strategy"] = (1 + hist["Strategy_Return"]).cumprod()
 
     return hist
 
 
-# ---------------------------------------------------------
-# STRATEGY SCORING
-# ---------------------------------------------------------
-
-def score_strategies(hist: pd.DataFrame, strategy: str) -> int:
+# ===== PORTFOLIO BACKTEST =====
+def backtest_portfolio(stock_list, strategy):
+    """Backtest dynamic portfolio: rebalance daily to top 5 scoring stocks.
+    
+    Process:
+    1. Fetch 1-year history for all stocks
+    2. Each trading day, score all stocks using strategy
+    3. Select top 5 highest-scoring stocks
+    4. Calculate equal-weighted portfolio return
+    5. Show cumulative performance over time
+    
+    Args: stock_list - tickers to evaluate, strategy - scoring strategy name
+    Returns: Cumulative portfolio returns series, or None if insufficient data
     """
-    Evaluate the selected strategy and return its score.
+    all_data = {}
 
-    Parameters
-    ----------
-    hist : pandas DataFrame
-        DataFrame containing calculated metrics.
+    print("\nFetching data for portfolio backtest...") 
 
-    strategy : str
-        Strategy selected by user.
+    # Data collection phase
+    for ticker in stock_list:
+        try:
+            hist = yf.Ticker(ticker).history(period="1y")
+            if not hist.empty:
+                hist = calculate_metrics(hist).dropna() 
+                # Require minimum 60 days for momentum calculation
+                if len(hist) > 60:
+                    all_data[ticker] = hist
+        except:
+            continue
 
-    Returns
-    -------
-    int
-        Strategy score (0–3).
+    if not all_data:
+        print("No valid data available.")
+        return None
+
+    # Find common trading dates across all stocks
+    common_dates = sorted(set.intersection(*(set(df.index) for df in all_data.values())))
+    print(f"Backtesting {len(all_data)} stocks over {len(common_dates)} trading days...")
+
+    portfolio_returns = []
+
+    # Daily rebalancing loop
+    for i in range(60, len(common_dates)):
+        day = common_dates[i]
+        scores = []
+
+        # Score each stock based on data available up to this day
+        for ticker, df in all_data.items():
+            df_slice = df[df.index <= day]
+            if len(df_slice) < 60:
+                continue
+
+            score = score_strategies(df_slice, strategy)
+            scores.append((ticker, score))
+
+        # Select top 5 highest-scoring stocks for today's portfolio
+        top_stocks = sorted(scores, key=lambda x: x[1], reverse=True)[:5]
+        daily_returns = []
+
+        # Calculate return for each selected stock today
+        for ticker, _ in top_stocks:
+            df = all_data[ticker]
+            if day in df.index:
+                prev_idx = df.index.get_loc(day) - 1
+                if prev_idx >= 0:
+                    prev_day = df.index[prev_idx]
+                    # Calculate 1-day return
+                    ret = df.loc[day]["Close"] / df.loc[prev_day]["Close"] - 1
+                    daily_returns.append(ret)
+
+        # Portfolio return = equal-weighted average of top 5 stocks
+        if daily_returns:
+            portfolio_returns.append(sum(daily_returns) / len(daily_returns))
+        else:
+            portfolio_returns.append(0)
+
+    # Calculate cumulative returns from daily returns
+    portfolio_series = pd.Series(portfolio_returns)
+    cumulative = (1 + portfolio_series).cumprod()
+
+    return cumulative
+
+
+# ===== USER INPUT HANDLERS =====
+def choose_mode():
+    """Prompt user to choose analysis mode.
+    
+    Modes:
+    - 'single': Analyze and backtest one stock
+    - 'best': Scan all stocks, find top performers, backtest portfolio
     """
-
-    # Use latest available data
-    latest = hist.iloc[-1]
-
-    # Score counter
-    score = 0
-
-    # -----------------------------------------------------
-    # MOMENTUM STRATEGY
-    # -----------------------------------------------------
-    if strategy == "momentum":
-
-        # Strong 60 day return
-        if latest["Momentum"] > 0.05:
-            score += 1
-
-        # Short term trend above medium trend
-        if latest["MA20"] > latest["MA50"]:
-            score += 1
-
-        # Positive daily return
-        if latest["Returns"] > 0:
-            score += 1
-
-    # -----------------------------------------------------
-    # LOW VOLATILITY STRATEGY
-    # -----------------------------------------------------
-    elif strategy == "low_volatility":
-
-        # Annual volatility below 30%
-        if latest["Volatility"] < 0.30:
-            score += 1
-
-        # Daily movement within +/-2%
-        if abs(latest["Returns"]) < 0.02:
-            score += 1
-
-        # Stable trend
-        if latest["MA20"] >= latest["MA50"]:
-            score += 1
-
-    # -----------------------------------------------------
-    # VALUE STRATEGY
-    # -----------------------------------------------------
-    elif strategy == "value":
-
-        avg_price = hist["Close"].mean()
-
-        # Current price below average price
-        if latest["Close"] < avg_price:
-            score += 1
-
-        # Reasonable volatility
-        if latest["Volatility"] < 0.35:
-            score += 1
-
-        # Avoid strongly negative momentum
-        if latest["Momentum"] > -0.05:
-            score += 1
-
-    # -----------------------------------------------------
-    # BALANCED STRATEGY
-    # -----------------------------------------------------
-    elif strategy == "balanced":
-
-        if latest["Momentum"] > 0:
-            score += 1
-
-        if latest["Volatility"] < 0.35:
-            score += 1
-
-        if latest["MA20"] > latest["MA50"]:
-            score += 1
-
-    return score
+    selected = input("Enter 'single' or 'best': ").strip().lower()
+    return selected if selected in {"single", "best"} else "single"
 
 
-# ---------------------------------------------------------
-# STRATEGY DESCRIPTIONS
-# ---------------------------------------------------------
-
-STRATEGY_DESCRIPTIONS = {
-    "momentum": "Favors stronger recent returns and trend strength.",
-    "low_volatility": "Prefers lower volatility and steadier names.",
-    "value": "Tilts toward lower price relative to average.",
-    "balanced": "Mix of return, momentum, and risk control.",
-}
-
-
-# ---------------------------------------------------------
-# STRATEGY SELECTION
-# ---------------------------------------------------------
-
-def choose_strategy() -> str:
+def choose_strategy():
+    """Prompt user to select investment strategy.
+    
+    Available strategies:
+    - momentum: Trending stocks with positive momentum
+    - low_volatility: Stable stocks with predictable returns
+    - growth: High-growth stocks outperforming averages
+    - value: Undervalued stocks trading below historical average
+    - balanced: Moderate growth with stability
     """
-    Allow user to select a strategy.
-    """
-
-    strategy_names = list(STRATEGY_DESCRIPTIONS.keys())
-
-    print("\nAvailable strategies:")
-
-    for i, name in enumerate(strategy_names, start=1):
-        print(f"{i}. {name} - {STRATEGY_DESCRIPTIONS[name]}")
-
-    selected = input(
-        "Select strategy by number or name (default: balanced): "
-    ).strip().lower()
-
-    if not selected:
-        return "balanced"
-
-    if selected.isdigit():
-
-        idx = int(selected) - 1
-
-        if 0 <= idx < len(strategy_names):
-            return strategy_names[idx]
-
-        print("Invalid number. Using default: balanced.")
-        return "balanced"
-
-    if selected in STRATEGY_DESCRIPTIONS:
-        return selected
-
-    print("Invalid strategy. Using default: balanced.")
-    return "balanced"
+    strategies = ["momentum", "low_volatility", "growth", "value", "balanced"]
+    print("\nAvailable Strategies:")
+    for i, strat in enumerate(strategies, 1):
+        print(f"  {i}. {strat}")
+    print(f"  Strategies: {', '.join(strategies)}")
+    s = input("Choose strategy: ").strip().lower()
+    return s if s in strategies else "balanced"
 
 
-# ---------------------------------------------------------
-# MAIN PROGRAM
-# ---------------------------------------------------------
+# ===== MAIN APPLICATION FLOW =====
+print("="*60)
+print("Welcome to Stock Advisor - Multi-Strategy Analysis Tool")
+print("="*60)
+print("This application analyzes stocks based on different strategies")
+print("and provides backtest results comparing strategy vs buy-and-hold.")
+print("="*60)
 
-print("Welcome to the Stock Advisor tool")
-
-# User selects strategy
+mode = choose_mode()
 strategy = choose_strategy()
 
-# User enters stock ticker
-choice = input("Enter preferred stock ticker (example: AAPL): ").strip()
 
-# Ask if timeframe is needed
-c = input("Is a custom time frame needed? (yes/no): ").strip().lower()
+# ===== SINGLE STOCK MODE =====
+if mode == "single":
+    print("\n" + "-"*60)
+    print("SINGLE STOCK ANALYSIS MODE")
+    print("-"*60)
+    ticker_symbol = input("Enter ticker symbol (e.g., AAPL, MSFT): ").strip().upper()
 
-start_date = None
-end_date = str(date.today())
-
-if c == "yes":
-
-    start_date = input("Enter start date (yyyy-mm-dd): ").strip()
-
-    e = input(
-        "Enter end date (leave blank for current date): "
-    ).strip()
-
-    if e:
-        end_date = e
-
-
-print(f"\nSelected strategy: {strategy}")
-print(f"Selected stock: {choice}")
-
-if start_date:
-    print(f"Time frame: {start_date} to {end_date}")
-else:
-    print("Time frame: default (last 1 year)")
-
-print("\nFetching data and analyzing...")
-
-
-# ---------------------------------------------------------
-# DATA FETCHING AND ANALYSIS
-# ---------------------------------------------------------
-
-try:
-
-    ticker = yf.Ticker(choice)
-
-    # Fetch historical data
-    hist = (
-        ticker.history(start=start_date, end=end_date)
-        if start_date
-        else ticker.history(period="1y")
-    )
+    print(f"Fetching 1-year historical data for {ticker_symbol}...")
+    ticker = yf.Ticker(ticker_symbol)
+    hist = ticker.history(period="1y")
 
     if hist.empty:
-
-        print("No data found for the specified stock.")
-
+        print(f"❌ No data found for ticker: {ticker_symbol}")
     else:
+        print(f"✓ Successfully loaded {len(hist)} trading days of data")
+        
+        # Run backtest
+        print(f"\nRunning {strategy.upper()} strategy backtest...")
+        bt = backtest_single(hist, strategy)
 
-        print(
-            f"Data fetched from {hist.index[0].date()} "
-            f"to {hist.index[-1].date()}"
-        )
-
-        # Calculate financial indicators
-        hist = calculate_metrics(hist)
-
-        # Remove rows with NaN values
-        valid_hist = hist.dropna(
-            subset=["Returns", "Volatility", "Momentum", "MA20", "MA50"]
-        )
-
-        if valid_hist.empty:
-
-            print("Not enough data to evaluate strategy.")
-
+        print("\n" + "="*60)
+        print("BACKTEST RESULTS")
+        print("="*60)
+        market_return = (bt['Cumulative_Market'].iloc[-1] - 1) * 100
+        strategy_return = (bt['Cumulative_Strategy'].iloc[-1] - 1) * 100
+        outperformance = strategy_return - market_return
+        
+        print(f"Buy & Hold Return:    {market_return:>8.2f}%")
+        print(f"Strategy Return:      {strategy_return:>8.2f}%")
+        print(f"Outperformance:       {outperformance:>8.2f}%")
+        print("-"*60)
+        
+        # Determine winner
+        if outperformance > 1:
+            print(f"✓ Strategy BEAT buy-and-hold by {outperformance:.2f}%")
+        elif outperformance < -1:
+            print(f"✗ Strategy UNDERPERFORMED buy-and-hold by {abs(outperformance):.2f}%")
         else:
+            print(f"≈ Strategy MATCHED buy-and-hold performance")
 
-            # Score the selected strategy
-            selected_score = score_strategies(valid_hist, strategy)
 
-            # Check if strategy conditions are satisfied
-            fulfilled = selected_score >= 2
+# ===== BEST PERFORMERS MODE (PORTFOLIO) =====
+else:
+    print("\n" + "-"*60)
+    print("PORTFOLIO ANALYSIS MODE - Finding Best Performers")
+    print("-"*60)
+    print(f"Evaluating all stocks using {strategy.upper()} strategy...")
+    print("This may take a few moments...\n")
 
-            print(f"\nStrategy score: {selected_score}/3")
+    # Load all stocks from master data
+    filtered_stocks = st.dropna(subset=["ticker"]).copy()
+    evaluated_stocks = []
 
-            if fulfilled:
-                print(
-                    f"Result: {choice} fulfills "
-                    f"the '{strategy}' strategy."
-                )
-            else:
-                print(
-                    f"Result: {choice} does NOT fulfill "
-                    f"the '{strategy}' strategy."
-                )
+    # Score each stock
+    for idx, (_, row) in enumerate(filtered_stocks.iterrows()):
+        if idx % 10 == 0:
+            print(f"  Evaluated {idx}/{len(filtered_stocks)} stocks...", end="\r")
+        stock_data = evaluate_stock(row, strategy)
+        if stock_data is not None:
+            evaluated_stocks.append(stock_data)
 
-            # Show latest calculated metrics
-            print("\nLatest calculated metrics:")
+    if not evaluated_stocks:
+        print("❌ No valid stock data found.")
+        best_stocks = pd.DataFrame(columns=["ticker", "company", "Score", "Close", "Returns", "Momentum", "Volatility"])
+    else:
+        print(f"✓ Successfully evaluated {len(evaluated_stocks)} stocks          ")
+        
+        # Sort by strategy score, then by momentum for tie-breaking
+        scored_stocks = pd.DataFrame(evaluated_stocks)
+        best_stocks = scored_stocks.sort_values(
+            by=["Score", "Momentum"],
+            ascending=[False, False]
+        ).head(10)
 
-            print(
-                valid_hist[
-                    ["Close", "Returns", "Volatility", "Momentum", "MA20", "MA50"]
-                ].tail(1).to_string()
-            )
+    print("\n" + "="*60)
+    print("TOP 10 STOCKS BY STRATEGY SCORE")
+    print("="*60)
+    print(
+        best_stocks[
+            ["ticker", "company", "Score", "Close", "Returns", "Momentum", "Volatility"]
+        ].to_string(index=False)
+    )
+    print("="*60)
 
-except Exception as e:
+    # Optional portfolio backtesting
+    if not best_stocks.empty and input("\nBacktest top performers as dynamic portfolio? (y/n): ").lower() == "y":
+        print("\n" + "-"*60)
+        print("PORTFOLIO BACKTEST")
+        print("-"*60)
+        
+        tickers = best_stocks["ticker"].tolist()
+        result = backtest_portfolio(tickers, strategy)
 
-    print(f"Error fetching data for {choice}: {e}")
+        if result is not None:
+            print("\n" + "="*60)
+            print("PORTFOLIO BACKTEST RESULTS")
+            print("="*60)
+            portfolio_return = (result.iloc[-1] - 1) * 100
+            print(f"Portfolio Return (Equal-Weighted Top 5, Daily Rebalance):")
+            print(f"  {portfolio_return:.2f}% over 1 year")
+            print("="*60)
