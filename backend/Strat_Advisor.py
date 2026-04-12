@@ -1,4 +1,4 @@
-\"""Stock Advisor Application - Multi-Strategy Stock Analysis & Backtesting Tool
+"""Stock Advisor Application - Multi-Strategy Stock Analysis & Backtesting Tool
 
 This application provides:
 - Technical analysis metrics (volatility, momentum, moving averages)
@@ -59,105 +59,58 @@ def calculate_metrics(hist: pd.DataFrame) -> pd.DataFrame:
 
 # ===== STRATEGY SCORING ENGINE =====
 def score_strategies(hist: pd.DataFrame, strategy: str) -> float:
-    """Score a stock based on selected strategy using weighted indicators.
+    """Score a stock based on selected strategy (0-3 scale).
     
-    Scoring approach: Instead of binary (1/0) per rule, uses magnitude-based
-    scoring to reflect signal strength. Score ranges from 0-3 (normalized).
-    
-    Strategies:
-    - momentum: Captures strong uptrends with recent positive momentum
-    - low_volatility: Favors stable stocks with predictable performance
-    - growth: Identifies high-growth stocks outperforming their averages
-    - value: Seeks undervalued stocks trading below historical average
-    - balanced: Mix of moderate growth and stability criteria
+    Each strategy uses 3 key metrics, each contributing 0-1 point max.
+    Scoring reflects strength of signal, not just threshold crossing.
     """
     if hist.empty:
         return 0.0
 
     latest = hist.iloc[-1]
     score = 0.0
-    max_score = 3.0
 
     if strategy == "momentum":
-        # Strong positive momentum (>5% 60-day return)
-        momentum_factor = max(0, min(latest["Momentum"] / 0.15, 1))  # Normalized to 0-1
-        score += momentum_factor
-        
-        # MA crossover: positive trend confirmation
-        if latest["MA20"] > latest["MA50"]:
-            ma_diff_pct = ((latest["MA20"] - latest["MA50"]) / latest["MA50"]) * 100
-            ma_strength = min(ma_diff_pct / 2.0, 1)  # Normalized, max at 2% difference
-            score += ma_strength
-        
-        # Recent positive returns (last day)
-        if latest["Returns"] > 0:
-            return_factor = min(latest["Returns"] / 0.05, 1)  # Normalized to 0-1
-            score += return_factor
+        # Momentum strength: 0 at -5%, 1 at +15%
+        score += max(0, min((latest["Momentum"] + 0.05) / 0.20, 1))
+        # Trend: 0.5 for MA20<MA50, 1 for MA20>MA50
+        score += 0.5 + (0.5 if latest["MA20"] > latest["MA50"] else 0)
+        # Recent daily return: 0-1 based on magnitude
+        score += max(0, min(latest["Returns"] / 0.03, 1))
 
     elif strategy == "low_volatility":
-        # Prefer lower volatility (stable, predictable returns)
-        volatility_score = max(0, (0.35 - latest["Volatility"]) / 0.35)  # Inverted: lower is better
-        score += volatility_score
-        
-        # Stable recent returns (small daily swings indicate stability)
-        return_stability = max(0, (0.05 - abs(latest["Returns"])) / 0.05)
-        score += return_stability
-        
-        # Uptrend or stability (MA20 >= MA50)
-        if latest["MA20"] >= latest["MA50"]:
-            score += 1.0
-        else:
-            score += 0.3  # Partial credit for downtrend
+        # Inverse volatility: 1 at 0%, 0 at 50%+
+        score += max(0, 1 - latest["Volatility"] / 0.50)
+        # Stable returns: 1 at 0%, 0 at 5%+
+        score += max(0, 1 - abs(latest["Returns"]) / 0.05)
+        # Trend: 1 for uptrend, 0.3 for downtrend
+        score += 1.0 if latest["MA20"] >= latest["MA50"] else 0.3
 
     elif strategy == "growth":
-        # Strong momentum for growth (>10% 60-day return)
-        growth_momentum = max(0, min(latest["Momentum"] / 0.20, 1))
-        score += growth_momentum
-        
-        # Price above 50-day MA indicates uptrend strength
-        if latest["Close"] > latest["MA50"]:
-            price_strength = min((latest["Close"] - latest["MA50"]) / latest["MA50"], 1)
-            score += price_strength
-        
-        # Price above historical average (trading above norm)
-        avg_price = hist["Close"].mean()
-        if latest["Close"] > avg_price:
-            growth_factor = min((latest["Close"] - avg_price) / avg_price, 1)
-            score += growth_factor
+        # Momentum strength: 0 at 0%, 1 at 20%+
+        score += max(0, min(latest["Momentum"] / 0.20, 1))
+        # Price vs MA50: how much above
+        score += max(0, min((latest["Close"] - latest["MA50"]) / latest["MA50"] / 0.05, 1))
+        # Price vs historical average: normalized discount/premium
+        score += max(0, min((latest["Close"] - hist["Close"].mean()) / hist["Close"].mean() / 0.10, 1))
 
     elif strategy == "value":
-        # Valuation: discount to historical average
-        avg_price = hist["Close"].mean()
-        if latest["Close"] < avg_price:
-            discount = (avg_price - latest["Close"]) / avg_price
-            score += min(discount / 0.15, 1)  # Max score at 15% discount
-        
-        # Stable volatility (< 35% annualized)
-        vol_score = max(0, (0.35 - latest["Volatility"]) / 0.35)
-        score += vol_score
-        
-        # Recovering/non-declining momentum (> -5%)
-        if latest["Momentum"] > -0.05:
-            recovery = (latest["Momentum"] + 0.05) / 0.10  # Normalized range
-            score += min(recovery, 1)
+        # Discount to average: 0 at 0%, 1 at 20%+ discount
+        score += max(0, min((hist["Close"].mean() - latest["Close"]) / hist["Close"].mean() / 0.20, 1))
+        # Inverse volatility (stable is better for value)
+        score += max(0, 1 - latest["Volatility"] / 0.50)
+        # Momentum not too negative: 1 at 0%, 0 at -20%
+        score += max(0, 1 - max(0, -latest["Momentum"] / 0.20))
 
     elif strategy == "balanced":
-        # Moderate positive momentum
-        balanced_momentum = max(0, min(latest["Momentum"] / 0.10, 1))
-        score += balanced_momentum
-        
-        # Moderate volatility (< 35% acceptable)
-        vol_balance = max(0, (0.40 - latest["Volatility"]) / 0.40)
-        score += vol_balance
-        
-        # Positive trend signal
-        if latest["MA20"] > latest["MA50"]:
-            score += 1.0
-        else:
-            score += 0.2  # Small penalty for downtrend
+        # Moderate momentum: 1 at 5%, 0 below -5%
+        score += max(0, min((latest["Momentum"] + 0.05) / 0.10, 1))
+        # Moderate volatility: 1 below 30%, 0 above 50%
+        score += max(0, 1 - latest["Volatility"] / 0.50)
+        # Trend signal: 1 for up, 0.5 for neutral/down
+        score += 1.0 if latest["MA20"] > latest["MA50"] else 0.5
 
-    # Normalize score to 0-3 range
-    return min(score, max_score)
+    return min(score, 3.0)
 
 
 def evaluate_stock(row: pd.Series, strategy: str):
